@@ -117,7 +117,7 @@ jobs:
 
       - name: Build unsigned HAP
         working-directory: source
-        run: flutter build hap --release --dart-define-from-file=.vscode/env.json
+        run: flutter build hap --release --no-codesign --dart-define-from-file=.vscode/env.json
 
       - name: Collect HAP and build provenance
         run: python3 kit/scripts/custom_release.py package
