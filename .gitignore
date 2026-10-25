@@ -1,0 +1,6 @@
+__pycache__/
+.validation/
+source/
+flutter/
+output/
+build-state.json

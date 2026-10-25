@@ -1,0 +1,137 @@
+name: Custom PiliPlus HAP
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: '留空：首次构建最新正式版，之后补齐新版本；填写 tag：重建指定正式版'
+        required: false
+        type: string
+  schedule:
+    - cron: '23 */6 * * *'
+
+# Prevent two scheduled/manual runs from publishing the same release at once.
+concurrency:
+  group: custom-piliplus-hap
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    # Scheduled workflows run on the default branch; require that for manual runs too.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: kit
+      - name: Verify updater logic
+        run: python3 -m unittest discover -s kit/scripts -p 'test_*.py' -v
+      - name: Select unpublished upstream releases
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.upstream_tag }}
+        run: python3 kit/scripts/custom_release.py plan
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.has_work == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: kit
+
+      - name: Resolve upstream release to an exact commit
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ matrix.release_id }}
+        run: python3 kit/scripts/custom_release.py resolve --release-id "$RELEASE_ID"
+
+      - name: Fetch full upstream history at that commit
+        uses: actions/checkout@v4
+        with:
+          repository: dev4harmony/PiliPlus
+          ref: ${{ steps.upstream.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
+
+      - name: Apply local patch and read version-specific toolchain settings
+        id: prepare
+        run: python3 kit/scripts/custom_release.py prepare
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl xz-utils zip libglu1-mesa
+
+      - name: Setup HarmonyOS toolchain
+        uses: ErBWs/setup-ohos@v1
+        with:
+          version: ${{ steps.prepare.outputs.ohos_version }}
+          cache: true
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ steps.prepare.outputs.java_version }}
+          distribution: temurin
+
+      - name: Setup release-specific Flutter OHOS
+        env:
+          FLUTTER_REPO: ${{ steps.prepare.outputs.flutter_repo }}
+          FLUTTER_REF: ${{ steps.prepare.outputs.flutter_ref }}
+        run: |
+          git clone --branch "$FLUTTER_REF" --single-branch "$FLUTTER_REPO" "$GITHUB_WORKSPACE/flutter"
+          echo "$GITHUB_WORKSPACE/flutter/bin" >> "$GITHUB_PATH"
+
+      - name: Generate upstream environment and normalize Dart package name
+        run: python3 kit/scripts/custom_release.py configure
+
+      - name: Install Flutter dependencies
+        working-directory: source
+        env:
+          GIT_LFS_SKIP_SMUDGE: '1'
+        run: flutter pub get
+
+      - name: Run patch regression tests
+        working-directory: source
+        run: flutter test test/custom_patch
+
+      - name: Build unsigned HAP
+        working-directory: source
+        run: flutter build hap --release --dart-define-from-file=.vscode/env.json
+
+      - name: Collect HAP and build provenance
+        run: python3 kit/scripts/custom_release.py package
+
+      # Keep an artifact even if publishing the release fails; it is NOT a success record.
+      - name: Upload unsigned HAP and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: PiliPlus-custom-upstream-${{ matrix.release_id }}
+          path: output/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish completed custom release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 kit/scripts/custom_release.py publish

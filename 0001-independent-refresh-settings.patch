@@ -1,0 +1,1008 @@
+From 9c28e9912c69d196d629392ec0a2ef36c5db7510 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local.invalid>
+Date: Sun, 25 Oct 2026 12:18:06 +0800
+Subject: [PATCH] Allow independent refresh height and trigger distance
+
+---
+ .../widgets/flutter/refresh_indicator.dart    |  26 +-
+ lib/common/widgets/refresh_layout.dart        |  18 +-
+ lib/models/common/refresh_settings.dart       |  42 +++
+ lib/pages/setting/models/extra_settings.dart  |  29 +-
+ .../widgets/refresh_settings_dialog.dart      | 116 ++++++++
+ lib/utils/storage_key.dart                    |   1 +
+ lib/utils/storage_pref.dart                   |  12 +-
+ test/custom_patch/refresh_indicator_test.dart | 269 ++++++++++++++++++
+ .../refresh_settings_dialog_test.dart         | 156 ++++++++++
+ test/custom_patch/refresh_settings_test.dart  | 100 +++++++
+ 10 files changed, 741 insertions(+), 28 deletions(-)
+ create mode 100644 lib/models/common/refresh_settings.dart
+ create mode 100644 lib/pages/setting/widgets/refresh_settings_dialog.dart
+ create mode 100644 test/custom_patch/refresh_indicator_test.dart
+ create mode 100644 test/custom_patch/refresh_settings_dialog_test.dart
+ create mode 100644 test/custom_patch/refresh_settings_test.dart
+
+diff --git a/lib/common/widgets/flutter/refresh_indicator.dart b/lib/common/widgets/flutter/refresh_indicator.dart
+index d6be653673e13c5914c5ea9cfc4f1f557bde8c37..4713504fbe528bdb384c8ff5ac8057d178a1831b 100644
+--- a/lib/common/widgets/flutter/refresh_indicator.dart
++++ b/lib/common/widgets/flutter/refresh_indicator.dart
+@@ -8,6 +8,7 @@ import 'package:PiliPlus/common/widgets/refresh_layout.dart';
+ import 'package:PiliPlus/common/widgets/scroll_behavior.dart';
+ import 'package:PiliPlus/common/widgets/scroll_physics.dart'
+     show BouncingScrollPhysicsExt;
++import 'package:PiliPlus/models/common/refresh_settings.dart';
+ import 'package:PiliPlus/utils/platform_utils.dart';
+ import 'package:PiliPlus/utils/storage_pref.dart';
+ import 'package:extended_nested_scroll_view/refresh.dart';
+@@ -15,7 +16,7 @@ import 'package:flutter/foundation.dart' show clampDouble;
+ import 'package:flutter/material.dart' hide RefreshIndicator;
+ import 'package:os_type/os_type.dart';
+ 
+-const kIndicatorSize = 49.0;
++const kIndicatorSize = RefreshSettings.indicatorSize;
+ 
+ /// The distance from the child's top or bottom [edgeOffset] where
+ /// the refresh indicator will settle. During the drag that exposes the refresh
+@@ -29,17 +30,19 @@ double get displacement => _displacement;
+ set displacement(double value) {
+   if (_displacement == value) return;
+   _displacement = value;
+-  _refreshDragExtent = (value + kIndicatorSize) * _kDragSizeFactorLimit;
+ }
+ 
+-// The over-scroll distance that moves the indicator to its maximum
+-// displacement, as a percentage of the scrollable's container extent.
+-double _refreshDragExtent =
+-    (_displacement + kIndicatorSize) * _kDragSizeFactorLimit;
+-double get refreshDragExtent => _refreshDragExtent;
++double _refreshTriggerDistance = Pref.refreshTriggerDistance;
++double get refreshTriggerDistance => _refreshTriggerDistance;
++set refreshTriggerDistance(double value) {
++  _refreshTriggerDistance = value;
++}
++
++// Full animation extent; the actual refresh threshold is independent of height.
++double get refreshDragExtent => _refreshTriggerDistance * _kDragSizeFactorLimit;
+ // How much the scroll's drag gesture can overshoot the RefreshIndicator's
+ // displacement; max displacement = _kDragSizeFactorLimit * displacement.
+-const double _kDragSizeFactorLimit = 1.5;
++const double _kDragSizeFactorLimit = RefreshSettings.dragSizeFactorLimit;
+ 
+ // When the scroll ends, the duration of the refresh indicator's animation
+ // to the RefreshIndicator's displacement.
+@@ -340,7 +343,7 @@ class RefreshIndicatorState extends State<RefreshIndicator>
+         _checkDragOffset();
+ 
+         if (notification.dragDetails == null &&
+-            _valueColor.value!.a == _effectiveValueColor.a) {
++            _dragOffset! >= refreshTriggerDistance) {
+           // On iOS start the refresh when the Scrollable bounces back from the
+           // overscroll (ScrollNotification indicating this don't have dragDetails
+           // because the scroll activity is not directly triggered by a drag).
+@@ -355,7 +358,7 @@ class RefreshIndicatorState extends State<RefreshIndicator>
+     } else if (notification is ScrollEndNotification) {
+       switch (_status) {
+         case RefreshIndicatorStatus.drag:
+-          if (_valueColor.value!.a == _effectiveValueColor.a) {
++          if (_dragOffset! >= refreshTriggerDistance) {
+             _show();
+           } else {
+             _dismiss(RefreshIndicatorStatus.canceled);
+@@ -396,7 +399,7 @@ class RefreshIndicatorState extends State<RefreshIndicator>
+ 
+   void _checkDragOffset() {
+     assert(_status == RefreshIndicatorStatus.drag);
+-    double newValue = _dragOffset! / _refreshDragExtent;
++    double newValue = _dragOffset! / refreshDragExtent;
+     _positionController.value = clampDouble(
+       newValue,
+       0.0,
+@@ -522,6 +525,7 @@ class RefreshIndicatorState extends State<RefreshIndicator>
+ 
+     child = RefreshLayout(
+       body: child,
++      displacement: displacement,
+       // 布局尺寸固定，缩放交给绘制期的 ScaleTransition：RefreshLayout 收紧
+       // 布局约束时，SDK 内层的固定内边距会让弧先归零，出现圆形背景已消失
+       // 而弧仍在绘制的问题。
+diff --git a/lib/common/widgets/refresh_layout.dart b/lib/common/widgets/refresh_layout.dart
+index ba900e4b0d1938b5d469d36d7ae83e71c12e274e..e890be9a460e81f3549d26d022d4a6f7ae162db9 100644
+--- a/lib/common/widgets/refresh_layout.dart
++++ b/lib/common/widgets/refresh_layout.dart
+@@ -1,5 +1,5 @@
+ import 'package:PiliPlus/common/widgets/flutter/refresh_indicator.dart'
+-    show displacement, kIndicatorSize;
++    show kIndicatorSize;
+ import 'package:PiliPlus/common/widgets/slotted_layout_helper.dart';
+ import 'package:flutter/rendering.dart' show BoxHitTestResult, ClipRectLayer;
+ import 'package:material_ui/material_ui.dart' hide RefreshIndicatorStatus;
+@@ -14,6 +14,7 @@ class RefreshLayout
+     required this.position,
+     required this.indicator,
+     required this.body,
++    required this.displacement,
+     this.edgeOffset = 0.0,
+   });
+ 
+@@ -21,6 +22,7 @@ class RefreshLayout
+   final Animation<double> position;
+   final Widget? indicator;
+   final Widget body;
++  final double displacement;
+ 
+   /// 指示器出现位置相对顶边的下移量，对应 RefreshIndicator.edgeOffset。
+   /// 上游 RefreshLayout 无此参数；鸿蒙沉浸顶栏下列表顶边在 ArkTS 顶栏
+@@ -41,6 +43,7 @@ class RefreshLayout
+     return RenderRefreshLayout(
+       scale: scale,
+       position: position,
++      displacement: displacement,
+       edgeOffset: edgeOffset,
+     );
+   }
+@@ -51,6 +54,7 @@ class RefreshLayout
+     RenderRefreshLayout renderObject,
+   ) {
+     renderObject.edgeOffset = edgeOffset;
++    renderObject.displacement = displacement;
+   }
+ }
+ 
+@@ -59,8 +63,10 @@ class RenderRefreshLayout extends RenderBox
+   RenderRefreshLayout({
+     required this.scale,
+     required this.position,
++    required double displacement,
+     double edgeOffset = 0.0,
+-  }) : _edgeOffset = edgeOffset {
++  }) : _displacement = displacement,
++       _edgeOffset = edgeOffset {
+     scale.addListener(_scaleListener);
+     position.addListener(_positionListener);
+   }
+@@ -69,6 +75,14 @@ class RenderRefreshLayout extends RenderBox
+ 
+   final Animation<double> position;
+ 
++  double _displacement;
++  double get displacement => _displacement;
++  set displacement(double value) {
++    if (_displacement == value) return;
++    _displacement = value;
++    markNeedsLayout();
++  }
++
+   double _edgeOffset;
+   double get edgeOffset => _edgeOffset;
+   set edgeOffset(double value) {
+diff --git a/lib/models/common/refresh_settings.dart b/lib/models/common/refresh_settings.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..81c2c520fa1e503644c4a5f6505bdcf94db89d6f
+--- /dev/null
++++ b/lib/models/common/refresh_settings.dart
+@@ -0,0 +1,42 @@
++/// Independent indicator position and refresh threshold, in logical pixels.
++class RefreshSettings {
++  const RefreshSettings({
++    required this.displacement,
++    required this.triggerDistance,
++  });
++
++  static const indicatorSize = 49.0;
++  static const dragSizeFactorLimit = 1.5;
++  static const maxDisplacement = 1000.0;
++  static const minDragDistance = 1.0;
++  static const maxDragDistance = 5000.0;
++
++  final double displacement;
++  final double triggerDistance;
++
++  static bool isValidDisplacement(num? value) =>
++      value != null && value.isFinite && value >= 0 && value <= maxDisplacement;
++
++  static bool isValidTriggerDistance(num? value) =>
++      value != null &&
++      value.isFinite &&
++      value >= minDragDistance &&
++      value <= maxDragDistance;
++
++  factory RefreshSettings.fromStored(
++    Object? displacement,
++    Object? triggerDistance, {
++    required double defaultDisplacement,
++  }) {
++    final height = displacement is num && isValidDisplacement(displacement)
++        ? displacement.toDouble()
++        : defaultDisplacement;
++    // Previously alpha reached 1 at 2/3 of the displayed drag extent.
++    // Preserve the actual old threshold, not that displayed extent.
++    final distance =
++        triggerDistance is num && isValidTriggerDistance(triggerDistance)
++        ? triggerDistance.toDouble()
++        : height + indicatorSize;
++    return RefreshSettings(displacement: height, triggerDistance: distance);
++  }
++}
+diff --git a/lib/pages/setting/models/extra_settings.dart b/lib/pages/setting/models/extra_settings.dart
+index 97f4ecbc3e15d4ca4d7fdbc5d7d78b22d22d233a..f898937fdcb8958330a3b758fb4057783e95adb0 100644
+--- a/lib/pages/setting/models/extra_settings.dart
++++ b/lib/pages/setting/models/extra_settings.dart
+@@ -5,7 +5,7 @@ import 'package:PiliPlus/common/widgets/custom_icon.dart';
+ import 'package:PiliPlus/common/widgets/dialog/simple_dialog_option.dart';
+ import 'package:PiliPlus/common/widgets/emote_tooltip.dart';
+ import 'package:PiliPlus/common/widgets/flutter/refresh_indicator.dart'
+-    show RefreshIndicator, displacement, refreshDragExtent;
++    show RefreshIndicator, displacement, refreshTriggerDistance;
+ import 'package:PiliPlus/common/widgets/gesture/horizontal_drag_gesture_recognizer.dart'
+     show deviceTouchSlop, touchSlopH;
+ import 'package:PiliPlus/common/widgets/image_grid/image_grid_view.dart'
+@@ -17,6 +17,7 @@ import 'package:PiliPlus/http/loading_state.dart';
+ import 'package:PiliPlus/models/common/audio_normalization.dart';
+ import 'package:PiliPlus/models/common/dynamic/dynamics_type.dart';
+ import 'package:PiliPlus/models/common/member/tab_type.dart';
++import 'package:PiliPlus/models/common/refresh_settings.dart';
+ import 'package:PiliPlus/models/common/reply/reply_sort_type.dart';
+ import 'package:PiliPlus/models/common/sponsor_block/skip_type.dart';
+ import 'package:PiliPlus/models/common/super_resolution_type.dart';
+@@ -26,6 +27,7 @@ import 'package:PiliPlus/pages/common/slide/common_slide_page.dart';
+ import 'package:PiliPlus/pages/home/controller.dart';
+ import 'package:PiliPlus/pages/main/controller.dart';
+ import 'package:PiliPlus/pages/setting/models/model.dart';
++import 'package:PiliPlus/pages/setting/widgets/refresh_settings_dialog.dart';
+ import 'package:PiliPlus/pages/setting/widgets/select_dialog.dart';
+ import 'package:PiliPlus/pages/setting/widgets/slider_dialog.dart';
+ import 'package:PiliPlus/pages/video/reply/widgets/reply_item_grpc.dart';
+@@ -255,7 +257,7 @@ List<SettingsModel> get extraSettings => [
+     title: '刷新指示器高度',
+     leading: const Icon(Icons.height),
+     getSubtitle: () =>
+-        '当前指示器高度: ${Pref.refreshDisplacement}, 刷新滑动距离: $refreshDragExtent',
++        '当前指示器高度: ${Pref.refreshDisplacement}, 下拉触发距离: ${Pref.refreshTriggerDistance}',
+     onTap: _showRefreshDialog,
+   ),
+   const SwitchModel(
+@@ -956,23 +958,26 @@ Future<void> _showRefreshDialog(
+   BuildContext context,
+   VoidCallback setState,
+ ) async {
+-  final res = await showDialog<double>(
++  final res = await showDialog<RefreshSettings>(
+     context: context,
+-    builder: (context) => SliderDialog(
+-      title: const Text('刷新指示器高度'),
+-      min: 10.0,
+-      max: 100.0,
+-      divisions: 9,
+-      value: Pref.refreshDisplacement,
++    builder: (context) => RefreshSettingsDialog(
++      value: Pref.refreshSettings,
++      defaultDisplacement: PlatformUtils.isMobile ? 20.0 : 40.0,
+     ),
+   );
+   if (res != null) {
+-    displacement = res;
+-    await GStorage.setting.put(SettingBoxKey.refreshDisplacement, res);
++    // Persist both values even if only height was edited, so the legacy
++    // distance fallback cannot couple them again after restarting.
++    await GStorage.setting.putAll({
++      SettingBoxKey.refreshDisplacement: res.displacement,
++      SettingBoxKey.refreshTriggerDistance: res.triggerDistance,
++    });
++    displacement = res.displacement;
++    refreshTriggerDistance = res.triggerDistance;
+     if (WidgetsBinding.instance.rootElement case final context?) {
+       context.visitChildElements(_visitor);
+     }
+-    setState();
++    if (context.mounted) setState();
+   }
+ }
+ 
+diff --git a/lib/pages/setting/widgets/refresh_settings_dialog.dart b/lib/pages/setting/widgets/refresh_settings_dialog.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a2d5ae67367c894c27d3ff90d49367db9924196
+--- /dev/null
++++ b/lib/pages/setting/widgets/refresh_settings_dialog.dart
+@@ -0,0 +1,116 @@
++import 'package:PiliPlus/models/common/refresh_settings.dart';
++import 'package:material_ui/material_ui.dart';
++
++class RefreshSettingsDialog extends StatefulWidget {
++  const RefreshSettingsDialog({
++    super.key,
++    required this.value,
++    required this.defaultDisplacement,
++  });
++
++  final RefreshSettings value;
++  final double defaultDisplacement;
++
++  @override
++  State<RefreshSettingsDialog> createState() => _RefreshSettingsDialogState();
++}
++
++class _RefreshSettingsDialogState extends State<RefreshSettingsDialog> {
++  final _formKey = GlobalKey<FormState>();
++  late final _heightController = TextEditingController(
++    text: widget.value.displacement.toString(),
++  );
++  late final _distanceController = TextEditingController(
++    text: widget.value.triggerDistance.toString(),
++  );
++
++  @override
++  void dispose() {
++    _heightController.dispose();
++    _distanceController.dispose();
++    super.dispose();
++  }
++
++  void _restoreDefaults() {
++    _heightController.text = widget.defaultDisplacement.toString();
++    _distanceController.text =
++        (widget.defaultDisplacement + RefreshSettings.indicatorSize).toString();
++  }
++
++  void _save() {
++    if (!_formKey.currentState!.validate()) return;
++    Navigator.pop(
++      context,
++      RefreshSettings(
++        displacement: double.parse(_heightController.text.trim()),
++        triggerDistance: double.parse(_distanceController.text.trim()),
++      ),
++    );
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return AlertDialog(
++      title: const Text('下拉刷新设置'),
++      content: SingleChildScrollView(
++        child: Form(
++          key: _formKey,
++          child: Column(
++            mainAxisSize: MainAxisSize.min,
++            crossAxisAlignment: CrossAxisAlignment.start,
++            children: [
++              TextFormField(
++                controller: _heightController,
++                keyboardType: const TextInputType.numberWithOptions(
++                  decimal: true,
++                ),
++                textInputAction: TextInputAction.next,
++                decoration: const InputDecoration(
++                  labelText: '指示器停留高度',
++                  helperText: '0～1000，可输入小数',
++                  suffixText: '逻辑像素',
++                ),
++                validator: (value) =>
++                    RefreshSettings.isValidDisplacement(
++                      double.tryParse(value?.trim() ?? ''),
++                    )
++                    ? null
++                    : '请输入 0～1000 之间的有效数字',
++              ),
++              const SizedBox(height: 20),
++              TextFormField(
++                controller: _distanceController,
++                keyboardType: const TextInputType.numberWithOptions(
++                  decimal: true,
++                ),
++                textInputAction: TextInputAction.done,
++                onFieldSubmitted: (_) => _save(),
++                decoration: const InputDecoration(
++                  labelText: '下拉触发距离',
++                  helperText: '1～5000，可输入小数',
++                  suffixText: '逻辑像素',
++                ),
++                validator: (value) =>
++                    RefreshSettings.isValidTriggerDistance(
++                      double.tryParse(value?.trim() ?? ''),
++                    )
++                    ? null
++                    : '请输入 1～5000 之间的有效数字',
++              ),
++              const SizedBox(height: 16),
++              const Text('高度与触发距离独立设置。触发距离越小，越容易刷新；实际手指行程受滚动阻尼影响。'),
++            ],
++          ),
++        ),
++      ),
++      actions: [
++        TextButton(onPressed: _restoreDefaults, child: const Text('恢复默认')),
++        TextButton(
++          onPressed: () => Navigator.pop(context),
++          child: const Text('取消'),
++        ),
++        TextButton(onPressed: _save, child: const Text('确定')),
++      ],
++    );
++  }
++}
+diff --git a/lib/utils/storage_key.dart b/lib/utils/storage_key.dart
+index 33c62a2b227cffb6f1cf77270de121fb8b276a53..562b887cb01f19f48d1293158a7578f96306ae89 100644
+--- a/lib/utils/storage_key.dart
++++ b/lib/utils/storage_key.dart
+@@ -107,6 +107,7 @@ abstract final class SettingBoxKey {
+       savedRcmdTip = 'savedRcmdTip',
+       openInBrowser = 'openInBrowser',
+       refreshDisplacement = 'refreshDisplacement',
++      refreshTriggerDistance = 'refreshTriggerDistance',
+       showHotRcmd = 'showHotRcmd',
+       audioNormalization = 'audioNormalization',
+       fallbackNormalization = 'fallbackNormalization',
+diff --git a/lib/utils/storage_pref.dart b/lib/utils/storage_pref.dart
+index 6be66e4d0d31d6157e23a1a45b46d118887de403..07fa78187dd076f8eff6725db225d37b86b08964 100644
+--- a/lib/utils/storage_pref.dart
++++ b/lib/utils/storage_pref.dart
+@@ -11,6 +11,7 @@ import 'package:PiliPlus/models/common/harmony/hds_material_level.dart';
+ import 'package:PiliPlus/models/common/member/tab_type.dart';
+ import 'package:PiliPlus/models/common/msg/msg_unread_type.dart';
+ import 'package:PiliPlus/models/common/nav_bar_config.dart';
++import 'package:PiliPlus/models/common/refresh_settings.dart';
+ import 'package:PiliPlus/models/common/reply/reply_sort_type.dart';
+ import 'package:PiliPlus/models/common/sponsor_block/segment_type.dart';
+ import 'package:PiliPlus/models/common/sponsor_block/skip_type.dart';
+@@ -315,11 +316,16 @@ abstract final class Pref {
+   static double get blockLimit =>
+       _setting.get(SettingBoxKey.blockLimit, defaultValue: 0.0);
+ 
+-  static double get refreshDisplacement => _setting.get(
+-    SettingBoxKey.refreshDisplacement,
+-    defaultValue: PlatformUtils.isMobile ? 20.0 : 40.0,
++  static RefreshSettings get refreshSettings => RefreshSettings.fromStored(
++    _setting.get(SettingBoxKey.refreshDisplacement),
++    _setting.get(SettingBoxKey.refreshTriggerDistance),
++    defaultDisplacement: PlatformUtils.isMobile ? 20.0 : 40.0,
+   );
+ 
++  static double get refreshDisplacement => refreshSettings.displacement;
++
++  static double get refreshTriggerDistance => refreshSettings.triggerDistance;
++
+   static String get blockUserID {
+     String? blockUserID = _setting.get(SettingBoxKey.blockUserID);
+     if (blockUserID == null || blockUserID.isEmpty) {
+diff --git a/test/custom_patch/refresh_indicator_test.dart b/test/custom_patch/refresh_indicator_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..d07995470176a5087d01c90802ee401691e7f10d
+--- /dev/null
++++ b/test/custom_patch/refresh_indicator_test.dart
+@@ -0,0 +1,269 @@
++import 'dart:async';
++import 'dart:io';
++
++import 'package:PiliPlus/common/widgets/flutter/refresh_indicator.dart'
++    as custom;
++import 'package:PiliPlus/utils/storage.dart';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:hive_ce/hive.dart';
++
++// Inject scroll notifications so these tests measure the component's actual
++// threshold independently of a platform's touch slop and scroll resistance.
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++  late Directory storageDirectory;
++
++  setUpAll(() async {
++    storageDirectory = await Directory.systemTemp.createTemp(
++      'piliplus_refresh_test_',
++    );
++    Hive.init(storageDirectory.path);
++    GStorage.setting = await Hive.openBox<dynamic>('setting');
++  });
++
++  tearDownAll(() async {
++    await GStorage.setting.close();
++    await storageDirectory.delete(recursive: true);
++  });
++
++  setUp(() {
++    custom.displacement = 20;
++    custom.refreshTriggerDistance = 100;
++  });
++
++  for (final height in <double>[0, 20, 300]) {
++    testWidgets('height $height does not change the refresh threshold', (
++      tester,
++    ) async {
++      custom.displacement = height;
++      final fixture = await _Fixture.mount(tester);
++
++      await fixture.start(tester);
++      await fixture.pull(tester, 99.5);
++      await fixture.release(tester);
++      expect(fixture.refreshCount, 0);
++
++      await fixture.start(tester);
++      await fixture.pull(tester, 100);
++      await fixture.release(tester);
++      expect(fixture.refreshCount, 1);
++    });
++  }
++
++  for (final distance in <double>[1, 60.5, 250]) {
++    testWidgets('distance $distance changes the threshold but not height', (
++      tester,
++    ) async {
++      custom.displacement = 35;
++      custom.refreshTriggerDistance = distance;
++      final fixture = await _Fixture.mount(tester, edgeOffset: 72);
++
++      await fixture.start(tester);
++      await fixture.pull(tester, distance - 0.25);
++      await fixture.release(tester);
++      expect(fixture.refreshCount, 0);
++
++      await fixture.start(tester);
++      await fixture.pull(tester, distance);
++      await fixture.release(tester);
++      expect(fixture.refreshCount, 1);
++      expect(fixture.indicatorTop(tester), closeTo(72 + 35, 0.001));
++    });
++  }
++
++  testWidgets('pulling back below the threshold cancels refresh', (
++    tester,
++  ) async {
++    final fixture = await _Fixture.mount(tester);
++    await fixture.start(tester);
++    await fixture.pull(tester, 120);
++    fixture.dispatch(
++      ScrollUpdateNotification(
++        metrics: _metrics,
++        context: fixture.context,
++        scrollDelta: 30,
++        dragDetails: DragUpdateDetails(
++          delta: const Offset(0, -30),
++          globalPosition: Offset.zero,
++        ),
++      ),
++    );
++    await tester.pump();
++    await fixture.release(tester);
++    expect(fixture.refreshCount, 0);
++  });
++
++  testWidgets('a transparent indicator does not refresh below the threshold', (
++    tester,
++  ) async {
++    final fixture = await _Fixture.mount(tester, color: Colors.transparent);
++    await fixture.start(tester);
++    await fixture.pull(tester, 10);
++    await fixture.release(tester);
++    expect(fixture.refreshCount, 0);
++
++    await fixture.start(tester);
++    await fixture.pull(tester, 100);
++    await fixture.release(tester);
++    expect(fixture.refreshCount, 1);
++  });
++
++  testWidgets('bounce-back notifications use the same explicit threshold', (
++    tester,
++  ) async {
++    final fixture = await _Fixture.mount(tester, color: Colors.transparent);
++    await fixture.start(tester);
++    await fixture.pull(tester, 99);
++    await fixture.bounce(tester);
++    expect(fixture.refreshCount, 0);
++
++    await fixture.pull(tester, 1);
++    await fixture.bounce(tester);
++    expect(fixture.refreshCount, 1);
++  });
++
++  testWidgets('changing height relayouts an already refreshing indicator', (
++    tester,
++  ) async {
++    final fixture = await _Fixture.mount(tester, edgeOffset: 64);
++    await fixture.start(tester);
++    await fixture.pull(tester, 100);
++    await fixture.release(tester);
++    expect(fixture.indicatorTop(tester), closeTo(64 + 20, 0.001));
++
++    custom.displacement = 125.5;
++    // The settings page marks existing indicator elements for rebuild.
++    (fixture.indicatorKey.currentContext! as Element).markNeedsBuild();
++    await tester.pump();
++
++    expect(fixture.indicatorTop(tester), closeTo(64 + 125.5, 0.001));
++    expect(custom.refreshTriggerDistance, 100);
++    expect(fixture.refreshCount, 1);
++  });
++
++  testWidgets('programmatic show remains independent of the drag distance', (
++    tester,
++  ) async {
++    custom.displacement = 48;
++    custom.refreshTriggerDistance = 5000;
++    final fixture = await _Fixture.mount(tester, edgeOffset: 32);
++    final refresh = fixture.indicatorKey.currentState!.show();
++    await tester.pump();
++    await tester.pump(const Duration(milliseconds: 200));
++
++    expect(fixture.refreshCount, 1);
++    expect(fixture.indicatorTop(tester), closeTo(32 + 48, 0.001));
++    fixture.done.complete();
++    await tester.pump();
++    await refresh;
++    await tester.pumpAndSettle();
++  });
++}
++
++final _metrics = FixedScrollMetrics(
++  minScrollExtent: 0,
++  maxScrollExtent: 1000,
++  pixels: 0,
++  viewportDimension: 600,
++  axisDirection: AxisDirection.down,
++  devicePixelRatio: 1,
++);
++
++class _Fixture {
++  final indicatorKey = GlobalKey<custom.RefreshIndicatorState>();
++  final bodyKey = GlobalKey();
++  final done = Completer<void>();
++  int refreshCount = 0;
++
++  BuildContext get context => bodyKey.currentContext!;
++
++  static Future<_Fixture> mount(
++    WidgetTester tester, {
++    double edgeOffset = 0,
++    Color? color,
++  }) async {
++    final fixture = _Fixture();
++    addTearDown(() async {
++      if (!fixture.done.isCompleted) fixture.done.complete();
++      await tester.pump();
++      await tester.pumpWidget(const SizedBox.shrink());
++    });
++    await tester.pumpWidget(
++      MaterialApp(
++        home: custom.RefreshIndicator(
++          key: fixture.indicatorKey,
++          edgeOffset: edgeOffset,
++          color: color,
++          onRefresh: () {
++            fixture.refreshCount++;
++            return fixture.done.future;
++          },
++          child: Builder(
++            key: fixture.bodyKey,
++            builder: (_) => const SizedBox.expand(),
++          ),
++        ),
++      ),
++    );
++    return fixture;
++  }
++
++  void dispatch(ScrollNotification notification) {
++    notification.dispatch(context);
++  }
++
++  Future<void> start(WidgetTester tester) async {
++    dispatch(
++      ScrollStartNotification(
++        metrics: _metrics,
++        context: context,
++        dragDetails: DragStartDetails(),
++      ),
++    );
++    await tester.pump();
++  }
++
++  Future<void> pull(WidgetTester tester, double distance) async {
++    dispatch(
++      OverscrollNotification(
++        metrics: _metrics,
++        context: context,
++        overscroll: -distance,
++        dragDetails: DragUpdateDetails(
++          delta: Offset(0, distance),
++          globalPosition: Offset.zero,
++        ),
++      ),
++    );
++    await tester.pump();
++  }
++
++  Future<void> release(WidgetTester tester) async {
++    dispatch(ScrollEndNotification(metrics: _metrics, context: context));
++    await tester.pump();
++    // _dismiss first yields a microtask before starting its animation.
++    await tester.pump();
++    // Both a canceled pull and a snap animation finish within 200 ms.
++    await tester.pump(const Duration(milliseconds: 250));
++    await tester.pump();
++  }
++
++  Future<void> bounce(WidgetTester tester) async {
++    dispatch(
++      ScrollUpdateNotification(
++        metrics: _metrics,
++        context: context,
++        scrollDelta: 0,
++      ),
++    );
++    await tester.pump();
++    await tester.pump(const Duration(milliseconds: 200));
++    await tester.pump();
++  }
++
++  double indicatorTop(WidgetTester tester) {
++    return tester.getTopLeft(find.byType(RefreshProgressIndicator)).dy -
++        tester.getTopLeft(find.byKey(bodyKey)).dy;
++  }
++}
+diff --git a/test/custom_patch/refresh_settings_dialog_test.dart b/test/custom_patch/refresh_settings_dialog_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..ab7ddc452acac102ae02780cdff481a3a0ad97f4
+--- /dev/null
++++ b/test/custom_patch/refresh_settings_dialog_test.dart
+@@ -0,0 +1,156 @@
++import 'package:PiliPlus/models/common/refresh_settings.dart';
++import 'package:PiliPlus/pages/setting/widgets/refresh_settings_dialog.dart';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++void main() {
++  testWidgets('saving only height keeps the migrated distance independent', (
++    tester,
++  ) async {
++    final fixture = await _DialogFixture.open(tester);
++    await tester.enterText(fixture.heightField, '250.25');
++    await fixture.save(tester);
++
++    expect(fixture.resolved, isTrue);
++    expect(fixture.result!.displacement, 250.25);
++    expect(fixture.result!.triggerDistance, 69);
++  });
++
++  testWidgets('both decimal values can be entered and saved', (tester) async {
++    final fixture = await _DialogFixture.open(tester);
++    await tester.enterText(fixture.heightField, '12.5');
++    await tester.enterText(fixture.distanceField, '420.25');
++    await fixture.save(tester);
++
++    expect(fixture.result!.displacement, 12.5);
++    expect(fixture.result!.triggerDistance, 420.25);
++  });
++
++  testWidgets('cancel discards edited values', (tester) async {
++    final fixture = await _DialogFixture.open(tester);
++    await tester.enterText(fixture.heightField, '120');
++    await tester.enterText(fixture.distanceField, '300');
++    await tester.tap(find.text('取消'));
++    await tester.pumpAndSettle();
++
++    expect(fixture.resolved, isTrue);
++    expect(fixture.result, isNull);
++  });
++
++  testWidgets(
++    'restore defaults requires confirmation and uses platform height',
++    (tester) async {
++      final fixture = await _DialogFixture.open(
++        tester,
++        value: const RefreshSettings(displacement: 180, triggerDistance: 400),
++        defaultDisplacement: 40,
++      );
++      await tester.tap(find.text('恢复默认'));
++      await tester.pump();
++
++      expect(fixture.resolved, isFalse);
++      expect(
++        tester.widget<TextFormField>(fixture.heightField).controller!.text,
++        '40.0',
++      );
++      expect(
++        tester.widget<TextFormField>(fixture.distanceField).controller!.text,
++        '89.0',
++      );
++      await fixture.save(tester);
++      expect(fixture.result!.displacement, 40);
++      expect(fixture.result!.triggerDistance, 89);
++    },
++  );
++
++  testWidgets('invalid heights stay in the dialog and can be corrected', (
++    tester,
++  ) async {
++    final fixture = await _DialogFixture.open(tester);
++    for (final invalid in ['', 'NaN', 'Infinity', '-1', '1000.1']) {
++      await tester.enterText(fixture.heightField, invalid);
++      await fixture.save(tester);
++      expect(fixture.resolved, isFalse, reason: 'height: $invalid');
++      expect(find.text('请输入 0～1000 之间的有效数字'), findsOneWidget);
++    }
++
++    await tester.enterText(fixture.heightField, '0');
++    await fixture.save(tester);
++    expect(fixture.result!.displacement, 0);
++    expect(fixture.result!.triggerDistance, 69);
++  });
++
++  testWidgets('invalid distances stay in the dialog and can be corrected', (
++    tester,
++  ) async {
++    final fixture = await _DialogFixture.open(tester);
++    for (final invalid in ['0', '5000.1', 'NaN', 'Infinity', 'abc']) {
++      await tester.enterText(fixture.distanceField, invalid);
++      await fixture.save(tester);
++      expect(fixture.resolved, isFalse, reason: 'distance: $invalid');
++      expect(find.text('请输入 1～5000 之间的有效数字'), findsOneWidget);
++    }
++
++    await tester.enterText(fixture.distanceField, '1');
++    await fixture.save(tester);
++    expect(fixture.result!.displacement, 20);
++    expect(fixture.result!.triggerDistance, 1);
++  });
++
++  testWidgets('upper boundaries are accepted', (tester) async {
++    final fixture = await _DialogFixture.open(tester);
++    await tester.enterText(fixture.heightField, '1000');
++    await tester.enterText(fixture.distanceField, '5000');
++    await fixture.save(tester);
++    expect(fixture.result!.displacement, 1000);
++    expect(fixture.result!.triggerDistance, 5000);
++  });
++}
++
++class _DialogFixture {
++  RefreshSettings? result;
++  bool resolved = false;
++
++  Finder get heightField => find.byType(TextFormField).at(0);
++  Finder get distanceField => find.byType(TextFormField).at(1);
++
++  static Future<_DialogFixture> open(
++    WidgetTester tester, {
++    RefreshSettings value = const RefreshSettings(
++      displacement: 20,
++      triggerDistance: 69,
++    ),
++    double defaultDisplacement = 20,
++  }) async {
++    final fixture = _DialogFixture();
++    await tester.pumpWidget(
++      MaterialApp(
++        home: Scaffold(
++          body: Builder(
++            builder: (context) => TextButton(
++              onPressed: () async {
++                fixture.result = await showDialog<RefreshSettings>(
++                  context: context,
++                  builder: (_) => RefreshSettingsDialog(
++                    value: value,
++                    defaultDisplacement: defaultDisplacement,
++                  ),
++                );
++                fixture.resolved = true;
++              },
++              child: const Text('打开设置'),
++            ),
++          ),
++        ),
++      ),
++    );
++    await tester.tap(find.text('打开设置'));
++    await tester.pumpAndSettle();
++    return fixture;
++  }
++
++  Future<void> save(WidgetTester tester) async {
++    await tester.tap(find.text('确定'));
++    await tester.pumpAndSettle();
++  }
++}
+diff --git a/test/custom_patch/refresh_settings_test.dart b/test/custom_patch/refresh_settings_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..310b9803d60b04bf0fd7ac4f638d9d1b4b00b208
+--- /dev/null
++++ b/test/custom_patch/refresh_settings_test.dart
+@@ -0,0 +1,100 @@
++import 'package:PiliPlus/models/common/refresh_settings.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++void main() {
++  test('a missing new setting preserves the old actual refresh threshold', () {
++    for (final height in <double>[10, 20, 40, 100]) {
++      final settings = RefreshSettings.fromStored(
++        height,
++        null,
++        defaultDisplacement: 20,
++      );
++      expect(settings.displacement, height);
++      // Old opacity reached 1 at 2/3 of the displayed (height + 49) * 1.5.
++      expect(settings.triggerDistance, height + 49);
++    }
++  });
++
++  test('first-run defaults follow the platform height', () {
++    final mobile = RefreshSettings.fromStored(
++      null,
++      null,
++      defaultDisplacement: 20,
++    );
++    final desktop = RefreshSettings.fromStored(
++      null,
++      null,
++      defaultDisplacement: 40,
++    );
++    expect(mobile.displacement, 20);
++    expect(mobile.triggerDistance, 69);
++    expect(desktop.displacement, 40);
++    expect(desktop.triggerDistance, 89);
++  });
++
++  test('stored integer and fractional values remain independent', () {
++    final settings = RefreshSettings.fromStored(
++      300,
++      12.5,
++      defaultDisplacement: 20,
++    );
++    expect(settings.displacement, 300.0);
++    expect(settings.triggerDistance, 12.5);
++  });
++
++  test('bad stored heights recover without replacing a valid distance', () {
++    for (final invalid in <Object?>[
++      null,
++      '20',
++      double.nan,
++      double.infinity,
++      -1,
++      1000.1,
++    ]) {
++      final settings = RefreshSettings.fromStored(
++        invalid,
++        250,
++        defaultDisplacement: 20,
++      );
++      expect(settings.displacement, 20, reason: 'stored height: $invalid');
++      expect(settings.triggerDistance, 250, reason: 'stored height: $invalid');
++    }
++  });
++
++  test('bad stored distances recover to the actual legacy threshold', () {
++    for (final invalid in <Object?>[
++      null,
++      '100',
++      double.nan,
++      double.infinity,
++      0,
++      -1,
++      5000.1,
++    ]) {
++      final settings = RefreshSettings.fromStored(
++        70,
++        invalid,
++        defaultDisplacement: 20,
++      );
++      expect(settings.displacement, 70, reason: 'stored distance: $invalid');
++      expect(
++        settings.triggerDistance,
++        119,
++        reason: 'stored distance: $invalid',
++      );
++    }
++  });
++
++  test('zero height and both upper boundaries survive storage reload', () {
++    final minimum = RefreshSettings.fromStored(0, 1, defaultDisplacement: 20);
++    final maximum = RefreshSettings.fromStored(
++      1000,
++      5000,
++      defaultDisplacement: 20,
++    );
++    expect(minimum.displacement, 0);
++    expect(minimum.triggerDistance, 1);
++    expect(maximum.displacement, 1000);
++    expect(maximum.triggerDistance, 5000);
++  });
++}
