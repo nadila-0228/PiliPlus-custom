@@ -1,0 +1,530 @@
+From 6ce7733c54679f54777aa2bb65acbe2b503df7e6 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local.invalid>
+Date: Mon, 26 Oct 2026 14:13:41 +0800
+Subject: [PATCH] Reduce Harmony scroll startup filtering with a reversible
+ setting
+
+---
+ lib/common/widgets/scroll_behavior.dart      |   8 +-
+ lib/common/widgets/scroll_physics.dart       |  20 +-
+ lib/pages/setting/models/extra_settings.dart |  12 +
+ lib/utils/storage_key.dart                   |   1 +
+ lib/utils/storage_pref.dart                  |   3 +
+ test/custom_patch/scroll_start_test.dart     | 382 +++++++++++++++++++
+ 6 files changed, 422 insertions(+), 4 deletions(-)
+ create mode 100644 test/custom_patch/scroll_start_test.dart
+
+diff --git a/lib/common/widgets/scroll_behavior.dart b/lib/common/widgets/scroll_behavior.dart
+index e2d55ff07102fdbf65698e50e6b0157c867d28f4..9d089b02d25c8ef9e7e896af2b225cbd769c5054 100644
+--- a/lib/common/widgets/scroll_behavior.dart
++++ b/lib/common/widgets/scroll_behavior.dart
+@@ -1,5 +1,7 @@
+ import 'dart:io' show Platform;
+ 
++import 'package:PiliPlus/common/widgets/scroll_physics.dart'
++    show HarmonyBouncingScrollPhysics;
+ import 'package:flutter/gestures.dart' show PointerDeviceKind;
+ import 'package:material_ui/material_ui.dart';
+ import 'package:os_type/os_type.dart';
+@@ -56,8 +58,8 @@ class NoOverscrollIndicator extends CustomScrollBehavior {
+ 
+ /// 鸿蒙上对齐 Flutter 在 iOS 上的滚动物理
+ /// 补充：保证 Flutter 上列表滚动物理和鸿蒙原生界面滚动物理保持一致
+-/// 与 scroll_configuration.dart 中 iOS 的 _bouncingPhysics 完全一致，
+-/// 即 BouncingScrollPhysics + RangeMaintainingScrollPhysics。
++/// 使用 BouncingScrollPhysics + RangeMaintainingScrollPhysics，
++/// 可选降低开始拖动时的额外位移过滤。
+ /// 过滚动指示沿用 [CustomScrollBehavior]：ohos 上非 Platform.isAndroid，
+ /// 走 return child，无拉伸/发光，与 iOS 一致
+ class HarmonyScrollBehavior extends CustomScrollBehavior {
+@@ -66,7 +68,7 @@ class HarmonyScrollBehavior extends CustomScrollBehavior {
+   @override
+   ScrollPhysics getScrollPhysics(BuildContext context) {
+     if (OS.isHarmony) {
+-      return const BouncingScrollPhysics(
++      return const HarmonyBouncingScrollPhysics(
+         parent: RangeMaintainingScrollPhysics(),
+       );
+     }
+diff --git a/lib/common/widgets/scroll_physics.dart b/lib/common/widgets/scroll_physics.dart
+index 890b8f4a396b93c82fb6ce8c4fa9d8c0bd293385..9cce70fd740693eb4202dbdd468ff0f51ce548ac 100644
+--- a/lib/common/widgets/scroll_physics.dart
++++ b/lib/common/widgets/scroll_physics.dart
+@@ -99,7 +99,25 @@ final platformAlwaysClampingPhysics = PlatformUtils.isDarwin || OS.isHarmony
+     ? const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysicsExt())
+     : const AlwaysScrollableScrollPhysics(parent: ClampingScrollPhysics());
+ 
+-class BouncingScrollPhysicsExt extends BouncingScrollPhysics
++// Read once at startup; the settings switch updates this for the next drag.
++// Keep gesture recognition thresholds unchanged so page/list direction selection
++// still uses the upstream rules. This only reduces the extra motion dead zone.
++bool quickScrollStart = OS.isHarmony && Pref.quickScrollStart;
++
++class HarmonyBouncingScrollPhysics extends BouncingScrollPhysics {
++  const HarmonyBouncingScrollPhysics({super.parent});
++
++  @override
++  HarmonyBouncingScrollPhysics applyTo(ScrollPhysics? ancestor) {
++    return HarmonyBouncingScrollPhysics(parent: buildParent(ancestor));
++  }
++
++  @override
++  double get dragStartDistanceMotionThreshold =>
++      quickScrollStart ? 1.0 : super.dragStartDistanceMotionThreshold;
++}
++
++class BouncingScrollPhysicsExt extends HarmonyBouncingScrollPhysics
+     with ClampingBoundaryMixin {
+   const BouncingScrollPhysicsExt({super.parent});
+ 
+diff --git a/lib/pages/setting/models/extra_settings.dart b/lib/pages/setting/models/extra_settings.dart
+index f898937fdcb8958330a3b758fb4057783e95adb0..01ca55d542eaca856c2281c27de7e9bb6d9c3dd9 100644
+--- a/lib/pages/setting/models/extra_settings.dart
++++ b/lib/pages/setting/models/extra_settings.dart
+@@ -11,6 +11,8 @@ import 'package:PiliPlus/common/widgets/gesture/horizontal_drag_gesture_recogniz
+ import 'package:PiliPlus/common/widgets/image_grid/image_grid_view.dart'
+     show ImageGridView, ImageModel;
+ import 'package:PiliPlus/common/widgets/pendant_avatar.dart';
++import 'package:PiliPlus/common/widgets/scroll_physics.dart'
++    show quickScrollStart;
+ import 'package:PiliPlus/grpc/reply.dart';
+ import 'package:PiliPlus/http/fav.dart';
+ import 'package:PiliPlus/http/loading_state.dart';
+@@ -54,6 +56,7 @@ import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+ import 'package:get/get.dart';
+ import 'package:material_design_icons_flutter/material_design_icons_flutter.dart';
+ import 'package:material_ui/material_ui.dart' hide RefreshIndicator;
++import 'package:os_type/os_type.dart';
+ 
+ List<SettingsModel> get extraSettings => [
+   if (PlatformUtils.isDesktop) ...[
+@@ -247,6 +250,15 @@ List<SettingsModel> get extraSettings => [
+     setKey: SettingBoxKey.openInBrowser,
+     defaultVal: false,
+   ),
++  if (OS.isHarmony)
++    SwitchModel(
++      title: '快速响应滑动起步',
++      subtitle: '减轻列表开始滑动时的迟滞；关闭恢复原版手感，下次滑动生效',
++      leading: const Icon(Icons.swipe_vertical),
++      setKey: SettingBoxKey.quickScrollStart,
++      defaultVal: true,
++      onChanged: (value) => quickScrollStart = value,
++    ),
+   NormalModel(
+     title: '横向滑动阈值',
+     getSubtitle: () => '当前:「${Pref.touchSlopH}」，系统默认值: $deviceTouchSlop',
+diff --git a/lib/utils/storage_key.dart b/lib/utils/storage_key.dart
+index 562b887cb01f19f48d1293158a7578f96306ae89..4ee6a0ee5b3e8c5476aa66853b8635e724c10b76 100644
+--- a/lib/utils/storage_key.dart
++++ b/lib/utils/storage_key.dart
+@@ -165,6 +165,7 @@ abstract final class SettingBoxKey {
+       enableImgMenu = 'enableImgMenu',
+       showDynDispute = 'showDynDispute',
+       touchSlopH = 'touchSlopH',
++      quickScrollStart = 'quickScrollStart',
+       floatingNavBar = 'floatingNavBar',
+       removeSafeArea = 'removeSafeArea',
+       angleDegrees = 'angleDegrees',
+diff --git a/lib/utils/storage_pref.dart b/lib/utils/storage_pref.dart
+index 07fa78187dd076f8eff6725db225d37b86b08964..3428cd31684d3f169633944f9f5fff7554e319be 100644
+--- a/lib/utils/storage_pref.dart
++++ b/lib/utils/storage_pref.dart
+@@ -1067,6 +1067,9 @@ abstract final class Pref {
+   static bool get showDynDispute =>
+       _setting.get(SettingBoxKey.showDynDispute, defaultValue: false);
+ 
++  static bool get quickScrollStart =>
++      _setting.get(SettingBoxKey.quickScrollStart, defaultValue: true);
++
+   // 竖向滚动 slop 已在 main._builder 统一为 8 逻辑像素（鸿蒙），横向取 12
+   // 时约 34° 以内的滑动可赢得竞技场，横竖手势按主导方向竞争。
+   static double get touchSlopH =>
+diff --git a/test/custom_patch/scroll_start_test.dart b/test/custom_patch/scroll_start_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..b921ec21b8dd383189251dedb6aecb366981d913
+--- /dev/null
++++ b/test/custom_patch/scroll_start_test.dart
+@@ -0,0 +1,382 @@
++import 'package:PiliPlus/common/widgets/scroll_physics.dart' as custom;
++import 'package:flutter/gestures.dart';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++// Exercise the SDK's real ScrollDragController through ScrollPosition.drag.
++// These timestamped updates start after gesture recognition, so they isolate
++// the extra scroll-motion threshold without changing/testing touch slop.
++void main() {
++  late bool originalQuickStart;
++
++  setUp(() {
++    originalQuickStart = custom.quickScrollStart;
++  });
++
++  tearDown(() {
++    custom.quickScrollStart = originalQuickStart;
++  });
++
++  const variants = <String, ScrollPhysics>{
++    'bouncing': custom.HarmonyBouncingScrollPhysics(),
++    'clamped boundary': custom.BouncingScrollPhysicsExt(),
++  };
++
++  for (final variant in variants.entries) {
++    test(
++      '${variant.key}: applyTo preserves class, parents and live setting',
++      () {
++        final physics = variant.value.applyTo(
++          const RangeMaintainingScrollPhysics(),
++        );
++        final composed = physics.applyTo(const AlwaysScrollableScrollPhysics());
++        expect(composed.runtimeType, variant.value.runtimeType);
++        expect(composed.parent, isA<RangeMaintainingScrollPhysics>());
++        expect(composed.parent!.parent, isA<AlwaysScrollableScrollPhysics>());
++
++        custom.quickScrollStart = true;
++        expect(composed.dragStartDistanceMotionThreshold, 1.0);
++        custom.quickScrollStart = false;
++        expect(composed.dragStartDistanceMotionThreshold, 3.5);
++      },
++    );
++
++    for (final enabled in [true, false]) {
++      final firstMovingStep = enabled ? 3 : 9;
++      final firstOffset = enabled ? 1.0 / 3.0 : 0.4;
++      final mode = enabled ? 'quick' : 'standard';
++
++      testWidgets(
++        '${variant.key}: $mode first micro-moves and steady scrolling',
++        (tester) async {
++          custom.quickScrollStart = enabled;
++          final fixture = await _ScrollFixture.mount(tester, variant.value);
++          fixture.start();
++          final initialOffset = fixture.offset;
++
++          for (var step = 1; step < firstMovingStep; step++) {
++            await fixture.move(tester, -0.4);
++            expect(fixture.offset, initialOffset, reason: 'small step $step');
++          }
++          await fixture.move(tester, -0.4);
++          expect(fixture.offset - initialOffset, closeTo(firstOffset, 1e-8));
++
++          // Once moving, every subsequent small input is transmitted unchanged.
++          // The earlier threshold crossing intentionally changes total distance.
++          for (final delta in [-0.4, -0.25, -0.8, 0.3, -0.6]) {
++            final before = fixture.offset;
++            await fixture.move(tester, delta);
++            expect(fixture.offset - before, closeTo(-delta, 1e-8));
++          }
++        },
++      );
++
++      testWidgets(
++        '${variant.key}: $mode resumes after a stationary timestamp',
++        (tester) async {
++          custom.quickScrollStart = enabled;
++          final fixture = await _ScrollFixture.mount(tester, variant.value);
++          fixture.start();
++          for (var step = 0; step < 10; step++) {
++            await fixture.move(tester, -0.4);
++          }
++          final pausedOffset = fixture.offset;
++
++          // A zero-delta event >50 ms after the last movement re-arms the SDK's
++          // motion threshold. Advancing pump time alone would not test this.
++          await fixture.move(tester, 0, elapsedMilliseconds: 60);
++          expect(fixture.offset, pausedOffset);
++          for (var step = 1; step < firstMovingStep; step++) {
++            await fixture.move(tester, -0.4);
++            expect(fixture.offset, pausedOffset, reason: 'resumed step $step');
++          }
++          await fixture.move(tester, -0.4);
++          expect(fixture.offset - pausedOffset, closeTo(firstOffset, 1e-8));
++          final resumedOffset = fixture.offset;
++          await fixture.move(tester, -0.4);
++          expect(fixture.offset - resumedOffset, closeTo(0.4, 1e-8));
++        },
++      );
++    }
++  }
++
++  for (final axis in Axis.values) {
++    final physics = axis == Axis.horizontal
++        ? const PageScrollPhysics(parent: custom.HarmonyBouncingScrollPhysics())
++        : const custom.HarmonyBouncingScrollPhysics();
++
++    testWidgets('${axis.name}: seven-pixel tap jitter still does not scroll', (
++      tester,
++    ) async {
++      custom.quickScrollStart = true;
++      final fixture = await _ScrollFixture.mount(tester, physics, axis: axis);
++      final gesture = await tester.startGesture(
++        tester.getCenter(find.byType(ListView)) + const Offset(10, 10),
++      );
++      for (var step = 1; step <= 14; step++) {
++        await gesture.moveBy(
++          fixture.axisOffset(-0.5),
++          timeStamp: Duration(milliseconds: step * 8),
++        );
++        await tester.pump(const Duration(milliseconds: 8));
++        expect(fixture.offset, 500);
++      }
++      await gesture.up(timeStamp: const Duration(milliseconds: 120));
++      await tester.pump();
++      expect(fixture.offset, 500);
++      expect(fixture.tapCount, 1);
++    });
++
++    testWidgets(
++      '${axis.name}: timestamped pointer steps start scrolling sooner',
++      (tester) async {
++        Future<int> firstMovement(bool enabled) async {
++          custom.quickScrollStart = enabled;
++          final fixture = await _ScrollFixture.mount(
++            tester,
++            physics,
++            axis: axis,
++          );
++          final gesture = await tester.startGesture(
++            tester.getCenter(find.byType(ListView)) + const Offset(10, 10),
++          );
++          int? firstStep;
++          for (var step = 1; step <= 32; step++) {
++            final before = fixture.offset;
++            await gesture.moveBy(
++              fixture.axisOffset(-0.5),
++              timeStamp: Duration(milliseconds: step * 8),
++            );
++            await tester.pump(const Duration(milliseconds: 8));
++            if (step <= 14) expect(fixture.offset, 500);
++            if (fixture.offset > 500) firstStep ??= step;
++            if (step >= 29) {
++              expect(fixture.offset - before, closeTo(0.5, 1e-8));
++            }
++          }
++          await gesture.cancel(timeStamp: const Duration(milliseconds: 264));
++          expect(firstStep, isNotNull);
++          await fixture.close(tester);
++          return firstStep!;
++        }
++
++        final standard = await firstMovement(false);
++        final quick = await firstMovement(true);
++        expect(quick, lessThan(standard));
++        // Both still have to pass the app's existing 8 px recognition threshold.
++        expect(quick * 0.5, greaterThan(8));
++      },
++    );
++  }
++
++  testWidgets(
++    'the quick threshold remains strict at exactly one logical pixel',
++    (tester) async {
++      custom.quickScrollStart = true;
++      final fixture = await _ScrollFixture.mount(
++        tester,
++        const custom.HarmonyBouncingScrollPhysics(),
++      );
++      fixture.start();
++      final initialOffset = fixture.offset;
++      for (var step = 0; step < 4; step++) {
++        await fixture.move(tester, -0.25);
++        expect(fixture.offset, initialOffset);
++      }
++      await fixture.move(tester, -0.1);
++      expect(fixture.offset - initialOffset, closeTo(0.1, 1e-8));
++    },
++  );
++
++  testWidgets(
++    'disabling quick start matches stock bouncing for the same trace',
++    (tester) async {
++      custom.quickScrollStart = false;
++      Future<List<double>> trace(ScrollPhysics physics) async {
++        final fixture = await _ScrollFixture.mount(tester, physics);
++        fixture.start();
++        final offsets = <double>[];
++        for (var step = 0; step < 12; step++) {
++          await fixture.move(tester, -0.4);
++          offsets.add(fixture.offset);
++        }
++        await fixture.move(tester, 0, elapsedMilliseconds: 60);
++        offsets.add(fixture.offset);
++        for (var step = 0; step < 12; step++) {
++          await fixture.move(tester, -0.4);
++          offsets.add(fixture.offset);
++        }
++        await fixture.close(tester);
++        return offsets;
++      }
++
++      final original = await trace(const BouncingScrollPhysics());
++      final disabled = await trace(const custom.HarmonyBouncingScrollPhysics());
++      expect(disabled, orderedEquals(original));
++    },
++  );
++
++  testWidgets('changing the switch takes effect on the next drag', (
++    tester,
++  ) async {
++    custom.quickScrollStart = false;
++    final fixture = await _ScrollFixture.mount(
++      tester,
++      const custom.HarmonyBouncingScrollPhysics(),
++    );
++    fixture.start();
++    final initialOffset = fixture.offset;
++    custom.quickScrollStart = true;
++
++    // The already-created controller retains its original 3.5 px threshold.
++    for (var step = 0; step < 8; step++) {
++      await fixture.move(tester, -0.4);
++      expect(fixture.offset, initialOffset);
++    }
++    await fixture.move(tester, -0.4);
++    expect(fixture.offset - initialOffset, closeTo(0.4, 1e-8));
++    fixture.stop();
++    fixture.controller.jumpTo(initialOffset);
++    await tester.pump();
++
++    fixture.start();
++    for (var step = 0; step < 2; step++) {
++      await fixture.move(tester, -0.4);
++      expect(fixture.offset, initialOffset);
++    }
++    await fixture.move(tester, -0.4);
++    expect(fixture.offset - initialOffset, closeTo(1.0 / 3.0, 1e-8));
++  });
++
++  test(
++    'quick start preserves clamped boundaries and bouncing drag resistance',
++    () {
++      final inBounds = _metrics(500);
++      final aboveStart = _metrics(-10);
++      const bouncing = custom.HarmonyBouncingScrollPhysics();
++      const clamped = custom.BouncingScrollPhysicsExt();
++      const stockBouncing = BouncingScrollPhysics();
++      const stockClamping = ClampingScrollPhysics();
++      for (final enabled in [true, false]) {
++        custom.quickScrollStart = enabled;
++        for (final metrics in [inBounds, aboveStart, _metrics(1010)]) {
++          for (final delta in [-0.4, 0.4]) {
++            expect(
++              bouncing.applyPhysicsToUserOffset(metrics, delta),
++              stockBouncing.applyPhysicsToUserOffset(metrics, delta),
++            );
++          }
++          for (final next in [-20.0, 0.0, 700.0, 1020.0]) {
++            expect(
++              clamped.applyBoundaryConditions(metrics, next),
++              stockClamping.applyBoundaryConditions(metrics, next),
++            );
++          }
++        }
++      }
++    },
++  );
++}
++
++FixedScrollMetrics _metrics(double pixels) => FixedScrollMetrics(
++  minScrollExtent: 0,
++  maxScrollExtent: 1000,
++  pixels: pixels,
++  viewportDimension: 600,
++  axisDirection: AxisDirection.down,
++  devicePixelRatio: 1,
++);
++
++class _ScrollFixture {
++  _ScrollFixture(this.axis);
++
++  final Axis axis;
++  final controller = ScrollController(initialScrollOffset: 500);
++  Drag? _drag;
++  var _timestamp = Duration.zero;
++  var _globalPosition = const Offset(400, 300);
++  bool _closed = false;
++  int tapCount = 0;
++
++  double get offset => controller.offset;
++
++  static Future<_ScrollFixture> mount(
++    WidgetTester tester,
++    ScrollPhysics physics, {
++    Axis axis = Axis.vertical,
++  }) async {
++    final fixture = _ScrollFixture(axis);
++    addTearDown(() => fixture.close(tester));
++    await tester.pumpWidget(
++      MaterialApp(
++        builder: (context, child) => MediaQuery(
++          data: MediaQuery.of(context).copyWith(
++            gestureSettings: const DeviceGestureSettings(touchSlop: 8),
++          ),
++          child: child!,
++        ),
++        home: Scaffold(
++          body: ListView.builder(
++            controller: fixture.controller,
++            physics: physics,
++            scrollDirection: axis,
++            itemExtent: 60,
++            itemCount: 100,
++            itemBuilder: (_, index) => GestureDetector(
++              behavior: HitTestBehavior.opaque,
++              onTap: () => fixture.tapCount++,
++              child: Text('Row $index'),
++            ),
++          ),
++        ),
++      ),
++    );
++    expect(fixture.offset, 500);
++    return fixture;
++  }
++
++  Offset axisOffset(double delta) =>
++      axis == Axis.horizontal ? Offset(delta, 0) : Offset(0, delta);
++
++  void start() {
++    _drag = controller.position.drag(
++      DragStartDetails(
++        sourceTimeStamp: _timestamp,
++        globalPosition: _globalPosition,
++        kind: PointerDeviceKind.touch,
++      ),
++      () {},
++    );
++  }
++
++  Future<void> move(
++    WidgetTester tester,
++    double delta, {
++    int elapsedMilliseconds = 8,
++  }) async {
++    final elapsed = Duration(milliseconds: elapsedMilliseconds);
++    _timestamp += elapsed;
++    _globalPosition += axisOffset(delta);
++    _drag!.update(
++      DragUpdateDetails(
++        sourceTimeStamp: _timestamp,
++        delta: axisOffset(delta),
++        primaryDelta: delta,
++        globalPosition: _globalPosition,
++      ),
++    );
++    await tester.pump(elapsed);
++  }
++
++  void stop() {
++    _drag!.end(DragEndDetails(primaryVelocity: 0));
++    _drag = null;
++  }
++
++  Future<void> close(WidgetTester tester) async {
++    if (_closed) return;
++    _closed = true;
++    await tester.pumpWidget(const SizedBox.shrink());
++    controller.dispose();
++  }
++}
