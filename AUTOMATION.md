@@ -27,7 +27,7 @@
 
 脚本读取该版本 `.github/workflows/release.yml` 的 Harmony SDK、Java、Flutter OHOS 分支参数，并交叉校验 `ohos/build-profile.json5` 的目标 SDK。工作流执行本工具明确写出的构建步骤，不直接运行上游 YAML。当前适配的是 `ErBWs/setup-ohos`、Java 17/21、`CPF-Flutter/flutter_flutter` GitCode 仓库及标准 unsigned HAP 输出路径。版本号变化会读取新值；仓库地址、命令格式、SDK 格式或输出约定变化会停止，提示修改适配脚本。上游的可选图片压缩步骤没有复制，因此包大小可能与作者原包不同。
 
-构建前执行补丁回归测试 `flutter test test/custom_patch`。工具链本身的下载、上游依赖、CI 额度、网络以及未来上游代码改动均可能导致失败，首次必须到 Actions 验证真实运行。本机已经验证纯 Python 逻辑、Actions 语法、补丁应用，以及隔离环境中的真实 Flutter 组件测试；这不能替代完整 HAP 构建。具体范围见 VALIDATION.md。
+构建前执行补丁回归测试 `flutter test test/custom_patch`，实际 HAP 构建使用 `--no-codesign` 生成未签名包。上一版刷新设置补丁已在用户仓库的 [运行 40164981188](https://github.com/nadila-0228/PiliPlus-custom/actions/runs/40164981188) 完成 24 项 Flutter 测试及完整 HAP 构建。新增快速起步补丁、部署到新仓库或适配新上游版本后，仍需核对对应 Actions 结果。工具链下载、依赖、CI 额度、网络以及上游改动均可能导致失败；设备上的签名安装和实际手感仍需验证。具体范围见 VALIDATION.md。
 
 `build-provenance.json` 记录上游 tag、commit、每个补丁 SHA-256、补丁集 SHA-256、工具包 commit、实际 Flutter commit、SDK 参数及 HAP SHA-256。附带的源码包是应用补丁后的 Git HEAD；生成环境元数据、版本计数及包名归一化由公开的工具包脚本完成，这些生成后变动不在 Git archive 中。Flutter 的上游分支及依赖可能变化，这些信息用于追溯，不能保证未来完全逐字节复现。
 
